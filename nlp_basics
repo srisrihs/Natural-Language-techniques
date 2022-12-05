@@ -1,0 +1,472 @@
+import seaborn as sns
+sns.set()
+
+
+
+# NLP: Analyzing Review Text
+
+
+Unstructured data makes up the vast majority of data.  This is a basic intro to handling unstructured data.  Our objective is to be able to extract the sentiment (positive or negative) and gain insight from review text.  We will do this from Yelp review data.
+
+## Metrics and scoring
+
+
+
+To start, let's download the data set from Amazon S3:
+
+The training data are a series of JSON objects, in a Gzipped file. Python supports Gzipped files natively: [`gzip.open`](https://docs.python.org/3/library/gzip.html) has the same interface as `open`, but handles `.gz` files automatically.
+
+The built-in `json` package has a `loads` function that converts a JSON string into a Python dictionary. We could call that once for each row of the file. [`ujson`](http://docs.micropython.org/en/latest/library/ujson.html) has the same interface as the built-in `json` package, but is *substantially* faster (at the cost of non-robust handling of malformed JSON). We will use that inside a list comprehension to get a list of dictionaries:
+
+import gzip
+import ujson as json
+
+with gzip.open('yelp_train_academic_dataset_review_reduced.json.gz') as f:
+    data = [json.loads(line) for line in f]
+
+The scikit-learn API requires that we keep labels (in this case, the star ratings) and features in separate data structures.
+
+stars = [row['stars'] for row in data]
+
+stars
+
+# Questions
+
+
+
+Build a linear model predicting the star rating based on the text reviews. Apply the bag-of-words model using the [`CountVectorizer`](http://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.CountVectorizer.html#sklearn.feature_extraction.text.CountVectorizer) to produce a feature matrix giving the counts of each word in each review.
+
+
+import pandas as pd
+df=pd.DataFrame(data)
+
+df['text']
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+
+selector= ColumnTransformer([(df, ['text'])])
+text=selector.fit_transform(data)
+
+from sklearn import base
+
+class ColumnSelectTransformer(base.BaseEstimator, base.TransformerMixin):
+    
+    def __init__(self, col_names):
+        self.col_names = col_names  # We will need these in transform()
+    
+    def fit(self, X, y=None):
+        # This transformer doesn't need to learn anything about the data,
+        # so it can just return self without any further processing
+        return self
+    
+    def transform(self, X):             
+        return [row[col] for col in self.col_names for row in X]
+
+selector=ColumnSelectTransformer(['text'])
+
+data_transform=selector.fit_transform(data)
+
+data_transform
+
+import gzip
+import ujson as json
+import random
+
+#Fraction to subsample, needs to be between 0 and 1
+subsample = 0.4
+
+with gzip.open('yelp_train_academic_dataset_review_reduced.json.gz') as f:
+    part_of_data = [json.loads(line) for line in f if random.random() < subsample]
+
+selector1=ColumnSelectTransformer(['text'])
+data_transform1=selector1.fit_transform(data)
+
+(data[1],stars[1])
+
+from sklearn.model_selection import GridSearchCV
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LinearRegression, Ridge
+
+#first_pipe= Pipeline(steps=[('selector1',ColumnSelectTransformer(['text'])),('cv', CountVectorizer()),('model', Ridge())])
+
+#param_grid = {'cv__min_df': np.arange(0,10,1),'cv__max_df': np.arange(.3,1,.1)}
+
+#search = GridSearchCV(first_pipe, param_grid,n_jobs=2,verbose=3)
+
+#search.fit(data, stars)
+
+
+search.best_params_,search.best_score_
+
+selector=ColumnSelectTransformer(['text'])
+data_transform=selector.fit_transform(data)
+
+first_pipe.fit(data,stars)
+
+bag_of_words_model = Pipeline(steps=[('data_transform',ColumnSelectTransformer(['text'])),('cv', CountVectorizer(min_df=9, max_df=.8)),('model', Ridge())])
+
+
+bag_of_words_model.fit(data, stars)
+
+## bigram_model
+
+In a bigram model, we'll consider both single words and pairs of consecutive words that appear. This is going to be a much higher-dimensional problem so you should be careful about overfitting. You should also use a vectorizer that applies some sort of normalization, e.g., the `TfidfVectorizer` or a word count vectorizer combined with `TfidfTransformer`.
+
+Sometimes, reducing the dimension can be useful. If you're using the `TfidfVectorizer`, you can change the `max_features` hyperparameter to reduce the size of the resulting vocabulary. For `HashingVectorizer`, you can adjust the size of the feature matrix through `n_features`.
+
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+bigram_model = Pipeline([('data_transform',ColumnSelectTransformer(['text'])),('cv', TfidfVectorizer(max_features=)),('model', Ridge())])
+
+param_grid = {
+        'model':np.arange(10,200,10)
+        
+    }
+grid = GridSearchCV(bigram_model, param_grid=param_grid)
+
+grid.fit(part_of_data,stars[:101132])
+
+#bigram_model = ...
+
+bigram_model.fit(data, stars)
+
+
+##  word_polarity
+
+Let's consider a different approach and try to derive some insight from our analysis.  
+
+We want to determine the most "polarizing words" in the corpus of reviews.  In other words, we want to identify words that strongly signal a review is either positive or negative.  For example, we understand that a word like "terrible" will most likely appear in negative rather than positive reviews.  
+
+During training, the [naive Bayes model](https://scikit-learn.org/stable/modules/naive_bayes.html#) calculates probabilities such as $Pr(\textrm{terrible}\ |\ \textrm{negative}),$ the probability that the word "terrible" appears in the review text, given that the review is negative.  Using these probabilities, we can define a **polarity score** for each word $w$,
+
+$$\textrm{polarity}(w) = \log\left(\frac{Pr(w\ |\ \textrm{positive})}{Pr(w\ |\ \textrm{negative})}\right).$$
+
+Polarity analysis is an example where a simpler model (naive Bayes) offers more explicability than more complicated models.  Aside from this, naive Bayes models are easy to train, the training process is parallelizable, and these models lend themselves well to online learning.  Given enough training data, naive Bayes models have performed well in NLP applications such as spam filtering.  
+
+For this problem, you are asked to determine the top 25 most positive polar words and the 25 most negative polar words.  For this analysis, you should:
+
+1.  **Filter** the collection of reviews you were using above to **only keep** the one-star and five-star reviews. Since these are the "most polar" reviews, it should give us the most polarizing words.   
+1.  Use the naive Bayes model, `MultinomialNB`.  
+1.  Use TF-IDF weighting.
+1.  Remove stop words.
+1.  As mentioned, generate a (Python) list with most positive (25 words) and most negative (25 words) polar words.  
+
+A naive Bayes model (after training) stores the log of the probabilities in an attribute of the model.  It is a `numpy` array of shape (number of classes, number of features).  You will need the mapping between feature indices to words to find the most polarizing words.  
+
+df['stars'],df['text']
+
+onestars=df.loc[df['stars'] == 1] 
+
+fivestars=df.loc[df['stars'] == 5] 
+
+combinedstars=pd.concat([onestars,fivestars])
+combinedstars
+
+listofreviews=(combinedstars[['stars','text']])
+
+X = listofreviews.iloc[:, :-1]
+y = listofreviews.iloc[:, 1:2]
+
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(listofreviews, test_size = 0.2, 
+                                                    random_state=42)
+
+
+
+texts=combinedstars['text'].values.tolist()
+newstars=combinedstars['stars'].values.tolist()
+mylist=(texts,newstars)
+
+import random
+from random import shuffle
+random.shuffle(mylist)
+
+from random import shuffle
+texts=shuffle(texts)
+newstars=shuffle(newstars)
+
+texts
+
+(shuffle(texts,newstars))
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
+
+est = Pipeline([('vectorizer', TfidfVectorizer()),
+                ('classifier', MultinomialNB())])
+
+est.fit(texts[:93260],newstars[:93260])
+
+est.score(texts,newstars)
+
+import spacy
+from spacy.lang.en.stop_words import STOP_WORDS
+nlp = spacy.load('en_core_web_sm', disable=['parser','ner','textcat'])
+
+STOP_WORDS = STOP_WORDS.union({'ll', 've'})
+# Removing a few words that don't lemmatize well
+STOP_WORDS = STOP_WORDS.difference({'he','his','her','hers'})
+
+def tokenize_lemma(text):
+    return [w.lemma_ for w in nlp(text)]
+
+stop_words_lemma = set(w.lemma_ for w in nlp(' '.join(sorted(STOP_WORDS))))
+
+est = Pipeline([('vectorizer', TfidfVectorizer(ngram_range=(1,2),
+                                               stop_words=stop_words_lemma,
+                                               tokenizer=tokenize_lemma)),
+                ('classifier', MultinomialNB())])
+
+est.fit(texts,newstars) # This may take 30 or 60 minutes to run 
+est.score(texts,newstars) 
+
+est_new = Pipeline([('vectorizer', TfidfVectorizer(ngram_range=(1,2),
+                                               stop_words=stop_words_lemma,
+                                               tokenizer=tokenize_lemma)),
+                ('classifier', SGDClassifier())])
+
+
+
+est_new.fit(texts[:93260],newstars[:93260]) # This may take 20 or 50 minutes to run 
+est_new.score(texts[:23315],newstars[:23315])
+
+vocab_new = est_new.get_params()['vectorizer'].vocabulary_ # A dictionary of (word, value) pairs
+                                                   # vocab['word'] is the index in the coefficient array corresponding to 'word'
+    
+coeff_pos_new = est.get_params()['classifier'].feature_log_prob_[1] 
+coeff_neg_new = est.get_params()['classifier'].feature_log_prob_[0]
+
+from numpy import argsort
+
+polarity_new = coeff_pos - coeff_neg
+indices_new = argsort(polarity) # indices of the polarity list, sorted from least to greatest
+
+print("Positive Words \n-----")
+for word in vocab_new:
+    if vocab[word] in indices[-10:]:
+        print(word)
+        
+print("\nNegative Words \n-----")
+for word in vocab_new:
+    if vocab[word] in indices[:10]:
+        print(word)   
+
+from sklearn.linear_model import SGDClassifier
+
+sgd_pipe = Pipeline([('vectorizer', TfidfVectorizer(ngram_range=(1,2),
+                                               stop_words=STOP_WORDS)), # lemmatization removed to improve runtime
+                     ('classifier', SGDClassifier(max_iter=40))])
+
+from sklearn.model_selection import GridSearchCV          
+
+parameters = {'vectorizer__ngram_range': [(1, 1), (1, 2)], 
+              'classifier__alpha': (0.001, 0.0001, 0.00001),
+              'classifier__loss': ('log', 'hinge'), # log = Logistic Regression, hinge = Linear SVM
+}
+
+grid = GridSearchCV(sgd_pipe, parameters, cv=5)
+grid.fit(texts,newstars) # This may take 2 or 3 minutes to run 
+
+est = grid.best_estimator_  #  Let's have a closer look at the best parameters...
+est.score(texts,newstars) 
+
+grid.best_params_
+
+est = Pipeline([('vectorizer', TfidfVectorizer(min_df=50)), # min_df=50 because we're not interested in uncommon words
+                ('classifier', MultinomialNB())])
+est.fit(texts,newstars)
+
+vocab = est.get_params()['vectorizer'].vocabulary_ # A dictionary of (word, value) pairs
+                                                   # vocab['word'] is the index in the coefficient array corresponding to 'word'
+    
+coeff_pos = est.get_params()['classifier'].feature_log_prob_[1] 
+coeff_neg = est.get_params()['classifier'].feature_log_prob_[0]
+
+vocab
+
+from numpy import argsort
+
+polarity = coeff_pos - coeff_neg
+indices = argsort(polarity) # indices of the polarity list, sorted from least to greatest
+
+print("Positive Words \n-----")
+for word in vocab:
+    if vocab[word] in indices[-10:]:
+        print(word)
+        
+print("\nNegative Words \n-----")
+for word in vocab:
+    if vocab[word] in indices[:10]:
+        print(word)   
+
+best_N = indices[-cutoff:] # Indices of the best/worst 250 words
+worst_N = indices[:cutoff]
+
+best_N = [word for (word,index) in vocab.items() if index in best_N] # Lists of the words themselves
+worst_N = [word for (word,index) in vocab.items() if index in worst_N]
+
+best_N+worst_N
+
+from numpy import argsort
+
+polarity = coeff_pos - coeff_neg
+indices = argsort(polarity) # indices of the polarity list, sorted from least to greatest
+
+print("Positive Words \n-----")
+for word in vocab:
+    if vocab[word] in indices[-10:]:
+        print(word)
+        
+print("\nNegative Words \n-----")
+for word in vocab:
+    if vocab[word] in indices[:10]:
+        print(word)   
+
+newlist=ColumnSelectTransformer(listofreviews)
+
+newlist
+
+# We're only keeping the one and five star reviews
+
+polar_words = (best_N+worst_N)
+
+
+## food_bigrams
+
+
+
+with gzip.open('yelp_train_academic_dataset_business.json.gz') as f:
+    business_data = [json.loads(line) for line in f]
+
+Each row of this file corresponds to a single business.  The category key gives a list of categories for each; take all where "Restaurants" appears.
+
+business_data[1]
+
+restaurant_ids=[]
+for i in business_data:
+    if 'Restaurants'in i['categories']:
+        restaurant_ids.append(i)
+restaurant_ids=[j['business_id'] for j in restaurant_ids]
+
+restaurant_ids
+
+restaurant_ids = [i['business_id'] for i in business_data if 'Restaurants' in i['categories']]
+
+restaurant_ids
+
+# Look at the categories to check for spelling and capitalization
+
+#The "business_id" here is the same as in the review data.  Use this to extract the review text for all reviews of restaurants.
+
+
+
+#restaurant_reviews = [i['text'] for i in data if i['business_id'] in restaurant_ids]
+
+#restaurant_reviews
+
+# Just reviews of restaurants
+# restaurant_ids is helpful here
+
+
+
+#Estimating the probabilities is simply a matter of counting, and there are number of approaches that will work.  One is to use one of the tokenizers to count up how many times each word and each bigram appears in each review, and then sum those up over all reviews.  You might want to know that the `CountVectorizer` has a `.get_feature_names_out()` method which gives the string associated with each column.  (Question for thought: Why doesn't the `HashingVectorizer` have a similar method?)
+
+*Questions:* This statistic is a ratio and problematic when the denominator is small.  We can fix this by applying Bayesian smoothing to $p(w)$ (i.e. mixing the empirical distribution with the uniform distribution over the vocabulary).
+
+1. How does changing this smoothing parameter affect the word pairs you get qualitatively?
+
+2. We can interpret the smoothing parameter as adding a constant number of occurrences of each word to our distribution.  Does this help you determine set a reasonable value for this 'prior factor'?
+
+3. For fun: also check out [Amazon's Statistically Improbable Phrases](http://en.wikipedia.org/wiki/Statistically_Improbable_Phrases).
+
+*Implementation note:*
+As you adjust the size of the Bayesian smoothing parameter, you will notice first nonsense phrases being removed and then legitimate bigrams being removed, leaving you with only generic bigrams.  The goal is to find a value of the smoothing parameter between these two transitions.
+
+The reference solution is not an aggressive filterer: it errors in favor of leaving apparently nonsensical words. On further consideration, many of these are actually somewhat meaningful. The smoothing parameter chosen in the reference solution is equivalent to giving each word 30 previous appearances prior to considering this data.  This was chosen by generating a list of bigrams for a range of smoothing parameters and seeing how many of the bigrams were shared between neighboring values.  When the shared fraction reached 95%, we judged the solution to have converged.
+
+There are a few reviews that include the same nonsense strings multiple times.  To keep these from showing up in our results, we set `min_df=10`, to ensure that a bigram occurs in at least 10 reviews before we consider it.
+
+## will start how the data is!!
+## Just move ahead with stop_words and with no range
+tokencount=CountVectorizer(stop_words='english')
+selecttokens=tokencount.fit_transform(restaurant_reviews)
+
+selectfeatures=tokencount.get_feature_names_out()
+selectfeatures
+
+selectfeatures=list(selectfeatures)
+
+#counting single word 
+single_w_counts = selecttokens.sum(axis = 0).A1
+single_w_counts
+
+list(single_w_counts)
+
+##User a counter to count the frequency and find the keys and values
+from collections import Counter
+count_word_freq= Counter(dict(zip(selectfeatures,single_w_counts)))
+
+count_word_freq
+
+import spacy
+from spacy.lang.en.stop_words import STOP_WORDS
+nlp = spacy.load('en_core_web_sm', disable=['parser','ner','textcat'])
+
+STOP_WORDS = STOP_WORDS.union({'ll', 've'})
+# Removing a few words that don't lemmatize well
+STOP_WORDS = STOP_WORDS.difference({'he','his','her','hers'})
+
+
+## Lets increase the range of search of words
+tokencount_two_words=CountVectorizer(ngram_range=(2,2),ngram_range=(1,2),
+                                               stop_words=stop_words_lemma)
+selecttokens_two_words=tokencount_two_words.fit_transform(restaurant_reviews)
+selectfeatures_two_words=tokencount_two_words.get_feature_names_out()
+selectfeatures_two_words=list(selectfeatures_two_words)
+double_w_counts = selecttokens_two_words.sum(axis = 0).A1
+count_word_freq_two_words= Counter(dict(zip(selectfeatures_two_words,double_w_counts)))
+
+# calculations of ratio's (Probabilities)
+
+#1. p(w)
+#"The reference solution is not an aggressive filterer: 
+#it errors in favor of leaving apparently nonsensical words.
+#On further consideration, many of these are actually somewhat meaningful.
+#The smoothing parameter chosen in the reference solution is equivalent to giving each word 
+#30 previous appearances prior to considering this data. This was chosen by generating 
+#a list of bigrams for a range of smoothing parameters and seeing how many of 
+#the bigrams were shared between neighboring values. When the shared fraction 
+#reached 95%, we judged the solution to have converged."
+
+
+# calculations of ratio's (Probabilities)
+def bigrams():
+    Totalcounts_single= sum(count_word_freq.values())
+    Totalcount_double= sum(count_word_freq_two_words.values())
+    for i,j in count_word_freq.items():
+        count_word_freq[i]+=30
+        count_word_freq[i]/=Totalcounts_single
+    
+#2. w1w2
+
+    for i,j in count_word_freq_two_words.items():
+        count_word_freq_two_words[i]/=Totalcount_double
+    for i,j in count_word_freq_two_words.items():
+        bigrams_split=i.split()
+        p_count_w1=count_word_freq[bigrams_split[0]]
+        p_count_w2=count_word_freq[bigrams_split[1]]
+    count_word_freq_two_words[i] /= (p_count_w1*p_count_w2)
+    return count_word_freq_two_words
+    
+
+bigrams()
+
+count_word_freq_two_words
+
+top100=[item[0] for item in count_word_freq_two_words.most_common(100)]
+top100
